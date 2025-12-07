@@ -1,0 +1,63 @@
+# Python 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 数据文件
+data/orderbooks/
+data/processed/
+*.csv
+*.parquet
+*.h5
+*.hdf5
+
+# 模型和输出
+outputs/models/*.pt
+outputs/models/*.pth
+outputs/logs/
+*.ckpt
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志文件
+*.log
+logs/
+
+# 测试和覆盖率
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# 打包
+dist/
+build/
+*.egg-info/
+*.egg
+
+# 其他
+*.bak
+*.tmp
+.env
+.env.local

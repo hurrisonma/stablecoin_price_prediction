@@ -1,0 +1,44 @@
+# 数据配置
+data:
+  symbol: "USDCUSDT"
+  data_dir: "data/orderbooks"
+  processed_dir: "data/processed"
+  
+# 特征配置
+features:
+  lookback_window: 60        # 回看窗口 (分钟)
+  prediction_horizon: 5      # 预测周期 (分钟)
+  price_threshold: 0.0001    # 价格变化阈值
+  
+# 数据划分
+split:
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  
+# 模型配置
+model:
+  type: "lstm"               # lstm / transformer
+  hidden_size: 128
+  num_layers: 2
+  dropout: 0.2
+  
+# Transformer 特定配置
+transformer:
+  d_model: 64
+  nhead: 4
+  num_encoder_layers: 2
+  dim_feedforward: 256
+  
+# 训练配置
+training:
+  batch_size: 64
+  learning_rate: 0.001
+  epochs: 100
+  early_stopping_patience: 10
+  class_weights: "balanced"  # balanced / none / custom
+  
+# 输出配置
+output:
+  model_dir: "outputs/models"
+  log_dir: "outputs/logs"
