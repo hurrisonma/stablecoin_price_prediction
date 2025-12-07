@@ -153,8 +153,7 @@ class Trainer:
                 self.optimizer,
                 mode='max',
                 factor=0.5,
-                patience=5,
-                verbose=True
+                patience=5
             )
         elif scheduler_type == 'cosine':
             self.scheduler = CosineAnnealingLR(

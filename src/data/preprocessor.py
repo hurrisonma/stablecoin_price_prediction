@@ -23,36 +23,57 @@ def calculate_mid_price(df: pd.DataFrame) -> pd.Series:
     return mid_price
 
 
-def generate_labels(mid_prices: pd.Series, 
+def generate_labels(prices: pd.Series, 
                    horizon: int, 
                    threshold: float = 0.0001) -> pd.Series:
     """
     生成价格变化标签 (三分类)
     
+    新方法：检测未来horizon分钟内是否会发生变化事件
+    （解决了浮点精度问题和往返变化被抵消的问题）
+    
     Args:
-        mid_prices: 中间价格序列
-        horizon: 预测周期 (分钟数)
+        prices: 价格序列 (使用 bid1_px)
+        horizon: 预测周期 (分钟数) - 检查未来N分钟内是否有变化
         threshold: 价格变化阈值
     
     Returns:
         标签序列:
-            0 - 下降 (price_change < -threshold)
-            1 - 不变 (-threshold <= price_change <= threshold)
-            2 - 上升 (price_change > threshold)
+            0 - 即将下跌 (未来N分钟内会发生下跌事件)
+            1 - 不变 (未来N分钟内没有变化事件)
+            2 - 即将上涨 (未来N分钟内会发生上涨事件)
     """
-    # 计算未来价格
-    future_price = mid_prices.shift(-horizon)
+    # 四舍五入到合理精度，避免浮点误差
+    prices = prices.round(6)
     
-    # 计算价格变化
-    price_change = future_price - mid_prices
+    # 计算每分钟的价格变化
+    price_diff = prices.diff()
     
-    # 生成标签
-    labels = pd.Series(1, index=mid_prices.index)  # 默认为不变
-    labels[price_change < -threshold] = 0  # 下降
-    labels[price_change > threshold] = 2   # 上升
+    # 容差处理，解决浮点精度问题
+    eps = threshold * 0.01  # 1%的容差
     
-    # 最后 horizon 个样本没有未来价格，标记为 NaN
-    labels.iloc[-horizon:] = np.nan
+    # 标记变化事件
+    up_events = price_diff >= (threshold - eps)    # 上涨事件
+    down_events = price_diff <= -(threshold - eps)  # 下跌事件
+    
+    # 初始化标签
+    labels = pd.Series(1, index=prices.index)
+    
+    # 对于每个变化事件，往前标记horizon分钟
+    # 上涨事件
+    for idx in prices.index[up_events]:
+        pos = prices.index.get_loc(idx)
+        # 变化发生在pos，往前标记 [pos-horizon, pos-1]
+        for i in range(max(0, pos - horizon), pos):
+            if labels.iloc[i] == 1:  # 只标记还未被标记的
+                labels.iloc[i] = 2
+    
+    # 下跌事件
+    for idx in prices.index[down_events]:
+        pos = prices.index.get_loc(idx)
+        for i in range(max(0, pos - horizon), pos):
+            if labels.iloc[i] == 1:
+                labels.iloc[i] = 0
     
     return labels
 
@@ -138,9 +159,9 @@ def prepare_data(df: pd.DataFrame,
     Returns:
         包含划分后数据的字典
     """
-    # 计算中间价格和标签
-    mid_prices = calculate_mid_price(df)
-    labels = generate_labels(mid_prices, horizon, threshold)
+    # 使用 bid1_px 生成标签 (稳定币spread恒定，bid1更客观)
+    bid1_prices = df['bid1_px']
+    labels = generate_labels(bid1_prices, horizon, threshold)
     
     # 移除标签为 NaN 的样本
     valid_mask = ~labels.isna()
