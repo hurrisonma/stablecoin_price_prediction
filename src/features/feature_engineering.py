@@ -1,6 +1,11 @@
 """
-特征工程模块
-从订单簿数据中提取各类特征
+特征工程模块 V2
+专为稳定币订单簿数据设计的特征
+
+核心设计原则：
+1. 聚焦订单簿动态变化，而非价格技术指标
+2. 加速度（二阶导数）是最重要的特征
+3. 一档数据最重要，二档作为辅助信号（聪明钱）
 """
 
 import pandas as pd
@@ -9,50 +14,46 @@ from typing import List, Optional
 
 
 def create_features(df: pd.DataFrame, 
-                    include_technical: bool = True,
-                    rolling_windows: List[int] = [5, 10, 20]) -> pd.DataFrame:
+                    rolling_windows: List[int] = [5, 15, 30]) -> pd.DataFrame:
     """
-    创建所有特征
+    创建订单簿动态特征
     
     Args:
         df: 原始订单簿数据 DataFrame
-        include_technical: 是否包含技术指标
-        rolling_windows: 滚动窗口大小列表
+        rolling_windows: 滚动窗口大小列表（分钟）
     
     Returns:
         特征 DataFrame
     """
     features = pd.DataFrame(index=df.index)
     
-    # 1. 基础价格特征
-    price_features = compute_price_features(df)
-    features = pd.concat([features, price_features], axis=1)
+    # 1. 一档深度特征（最重要）
+    tier1_features = compute_tier1_features(df)
+    features = pd.concat([features, tier1_features], axis=1)
     
-    # 2. 订单簿特征
-    orderbook_features = compute_orderbook_features(df)
-    features = pd.concat([features, orderbook_features], axis=1)
+    # 2. 二档深度特征（辅助信号）
+    tier2_features = compute_tier2_features(df)
+    features = pd.concat([features, tier2_features], axis=1)
     
-    # 3. 深度不平衡特征
+    # 3. 不平衡特征
     imbalance_features = compute_imbalance_features(df)
     features = pd.concat([features, imbalance_features], axis=1)
     
-    # 4. 技术指标
-    if include_technical:
-        mid_price = (df['bid1_px'] + df['ask1_px']) / 2
-        tech_features = compute_technical_indicators(mid_price, rolling_windows)
-        features = pd.concat([features, tech_features], axis=1)
+    # 4. 一档二档比值特征（聪明钱指标）
+    ratio_features = compute_ratio_features(df)
+    features = pd.concat([features, ratio_features], axis=1)
     
-    # 5. 时序变化特征
-    change_features = compute_change_features(df, rolling_windows)
-    features = pd.concat([features, change_features], axis=1)
+    # 5. 累计特征（滚动窗口）
+    cumulative_features = compute_cumulative_features(features, rolling_windows)
+    features = pd.concat([features, cumulative_features], axis=1)
     
-    # 处理无穷大值
+    # 6. 价差特征
+    spread_features = compute_spread_features(df)
+    features = pd.concat([features, spread_features], axis=1)
+    
+    # 处理无穷大和NaN
     features = features.replace([np.inf, -np.inf], np.nan)
-    
-    # 填充 NaN (使用前向填充)
-    features = features.fillna(method='ffill')
-    features = features.fillna(method='bfill')
-    features = features.fillna(0)  # 如果还有 NaN，用0填充
+    features = features.ffill().bfill().fillna(0)
     
     print(f"创建了 {len(features.columns)} 个特征")
     print(f"特征列表: {list(features.columns)}")
@@ -60,275 +61,228 @@ def create_features(df: pd.DataFrame,
     return features
 
 
-def compute_price_features(df: pd.DataFrame) -> pd.DataFrame:
+def compute_tier1_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    计算基础价格特征
+    计算一档深度特征（最重要）
     
-    Args:
-        df: 订单簿数据
-    
-    Returns:
-        价格特征 DataFrame
+    包含：
+    - 深度变化速度（一阶导数）
+    - 深度变化加速度（二阶导数）⭐ 最重要
     """
     features = pd.DataFrame(index=df.index)
     
-    # 中间价格
-    features['mid_price'] = (df['bid1_px'] + df['ask1_px']) / 2
+    # 原始深度
+    bid1_qty = df['bid1_qty']
+    ask1_qty = df['ask1_qty']
     
-    # 买卖价差
-    features['spread'] = df['ask1_px'] - df['bid1_px']
+    # === 速度（一阶导数）===
+    features['bid1_velocity'] = bid1_qty.diff()
+    features['ask1_velocity'] = ask1_qty.diff()
     
-    # 价差比率
-    features['spread_ratio'] = features['spread'] / features['mid_price']
+    # 净速度（买方 - 卖方）
+    features['net_velocity_1'] = features['bid1_velocity'] - features['ask1_velocity']
     
-    # 各档位价格与中间价格的距离
-    for i in range(1, 6):
-        features[f'bid{i}_dist'] = features['mid_price'] - df[f'bid{i}_px']
-        features[f'ask{i}_dist'] = df[f'ask{i}_px'] - features['mid_price']
+    # === 加速度（二阶导数）⭐ 最重要 ===
+    features['bid1_accel'] = features['bid1_velocity'].diff()
+    features['ask1_accel'] = features['ask1_velocity'].diff()
+    
+    # 净加速度
+    features['net_accel_1'] = features['bid1_accel'] - features['ask1_accel']
+    
+    # === 相对变化率 ===
+    # 避免除零，使用平滑处理
+    features['bid1_velocity_pct'] = bid1_qty.pct_change().clip(-1, 1)
+    features['ask1_velocity_pct'] = ask1_qty.pct_change().clip(-1, 1)
     
     return features
 
 
-def compute_orderbook_features(df: pd.DataFrame) -> pd.DataFrame:
+def compute_tier2_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    计算订单簿特征
-    
-    Args:
-        df: 订单簿数据
-    
-    Returns:
-        订单簿特征 DataFrame
+    计算二档深度特征（辅助信号，聪明钱埋伏）
     """
     features = pd.DataFrame(index=df.index)
     
-    # 总买卖量
-    bid_qty_cols = [f'bid{i}_qty' for i in range(1, 6)]
-    ask_qty_cols = [f'ask{i}_qty' for i in range(1, 6)]
+    bid2_qty = df['bid2_qty']
+    ask2_qty = df['ask2_qty']
     
-    features['total_bid_qty'] = df[bid_qty_cols].sum(axis=1)
-    features['total_ask_qty'] = df[ask_qty_cols].sum(axis=1)
-    features['total_qty'] = features['total_bid_qty'] + features['total_ask_qty']
+    # 速度
+    features['bid2_velocity'] = bid2_qty.diff()
+    features['ask2_velocity'] = ask2_qty.diff()
     
-    # 买卖量比率
-    features['bid_ask_qty_ratio'] = (features['total_bid_qty'] / 
-                                      (features['total_ask_qty'] + 1e-10))
+    # 加速度（重要性低于一档）
+    features['bid2_accel'] = features['bid2_velocity'].diff()
+    features['ask2_accel'] = features['ask2_velocity'].diff()
     
-    # 加权深度 (价格 × 数量)
-    bid_depth = 0
-    ask_depth = 0
-    for i in range(1, 6):
-        bid_depth += df[f'bid{i}_px'] * df[f'bid{i}_qty']
-        ask_depth += df[f'ask{i}_px'] * df[f'ask{i}_qty']
-    
-    features['bid_depth'] = bid_depth
-    features['ask_depth'] = ask_depth
-    features['depth_ratio'] = bid_depth / (ask_depth + 1e-10)
-    
-    # 深度压力差
-    features['depth_pressure'] = bid_depth - ask_depth
-    
-    # 各档位数量占比
-    for i in range(1, 6):
-        features[f'bid{i}_qty_ratio'] = df[f'bid{i}_qty'] / (features['total_bid_qty'] + 1e-10)
-        features[f'ask{i}_qty_ratio'] = df[f'ask{i}_qty'] / (features['total_ask_qty'] + 1e-10)
+    # 净变化
+    features['net_velocity_2'] = features['bid2_velocity'] - features['ask2_velocity']
+    features['net_accel_2'] = features['bid2_accel'] - features['ask2_accel']
     
     return features
 
 
 def compute_imbalance_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    计算深度不平衡特征
+    计算不平衡特征
     
-    Args:
-        df: 订单簿数据
-    
-    Returns:
-        不平衡特征 DataFrame
+    不平衡度 = (买 - 卖) / (买 + 卖)
+    范围: [-1, 1]
     """
     features = pd.DataFrame(index=df.index)
     
-    # 各档位不平衡
-    for i in range(1, 6):
-        bid_qty = df[f'bid{i}_qty']
-        ask_qty = df[f'ask{i}_qty']
-        
-        # 简单不平衡: (bid - ask) / (bid + ask)
-        features[f'imbalance_{i}'] = ((bid_qty - ask_qty) / 
-                                       (bid_qty + ask_qty + 1e-10))
+    # 一档不平衡
+    bid1 = df['bid1_qty']
+    ask1 = df['ask1_qty']
+    features['imbalance_1'] = (bid1 - ask1) / (bid1 + ask1 + 1e-10)
     
-    # 加权不平衡 (权重随档位递减)
-    weights = np.array([1.0, 0.8, 0.6, 0.4, 0.2])
-    weighted_bid = 0
-    weighted_ask = 0
+    # 二档不平衡
+    bid2 = df['bid2_qty']
+    ask2 = df['ask2_qty']
+    features['imbalance_2'] = (bid2 - ask2) / (bid2 + ask2 + 1e-10)
     
-    for i, w in enumerate(weights, 1):
-        weighted_bid += w * df[f'bid{i}_qty']
-        weighted_ask += w * df[f'ask{i}_qty']
+    # 综合不平衡（一档+二档）
+    total_bid = bid1 + bid2
+    total_ask = ask1 + ask2
+    features['imbalance_total'] = (total_bid - total_ask) / (total_bid + total_ask + 1e-10)
     
-    features['weighted_imbalance'] = ((weighted_bid - weighted_ask) / 
-                                       (weighted_bid + weighted_ask + 1e-10))
+    # === 不平衡的速度 ===
+    features['imbalance_1_velocity'] = features['imbalance_1'].diff()
+    features['imbalance_2_velocity'] = features['imbalance_2'].diff()
     
-    # 累计不平衡
-    cumulative_imbalance = 0
-    for i in range(1, 6):
-        bid_qty = df[f'bid{i}_qty']
-        ask_qty = df[f'ask{i}_qty']
-        cumulative_imbalance += (bid_qty - ask_qty)
-        features[f'cumulative_imbalance_{i}'] = cumulative_imbalance
+    # === 不平衡的加速度 ⭐ ===
+    features['imbalance_1_accel'] = features['imbalance_1_velocity'].diff()
+    features['imbalance_2_accel'] = features['imbalance_2_velocity'].diff()
     
     return features
+
+
+def compute_ratio_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    计算一档二档比值特征（聪明钱指标）
+    
+    思路：如果二档相对一档变强，说明聪明钱在二档埋伏
+    """
+    features = pd.DataFrame(index=df.index)
+    
+    bid1 = df['bid1_qty']
+    bid2 = df['bid2_qty']
+    ask1 = df['ask1_qty']
+    ask2 = df['ask2_qty']
+    
+    # 一档/二档比值
+    features['bid_ratio_12'] = bid1 / (bid2 + 1e-10)
+    features['ask_ratio_12'] = ask1 / (ask2 + 1e-10)
+    
+    # 比值的变化（速度）
+    features['bid_ratio_12_velocity'] = features['bid_ratio_12'].diff()
+    features['ask_ratio_12_velocity'] = features['ask_ratio_12'].diff()
+    
+    # 买卖比值对比
+    # 正值表示买方在一档更集中，负值表示卖方在一档更集中
+    features['ratio_diff'] = features['bid_ratio_12'] - features['ask_ratio_12']
+    features['ratio_diff_velocity'] = features['ratio_diff'].diff()
+    
+    return features
+
+
+def compute_cumulative_features(features: pd.DataFrame, 
+                                 windows: List[int] = [5, 15, 30]) -> pd.DataFrame:
+    """
+    计算累计/滚动特征
+    
+    累计过去N分钟的变化，捕捉趋势
+    """
+    cumulative = pd.DataFrame(index=features.index)
+    
+    # 关键特征的滚动累计
+    key_features = [
+        'net_velocity_1', 'net_accel_1',
+        'imbalance_1', 'imbalance_1_velocity'
+    ]
+    
+    for col in key_features:
+        if col not in features.columns:
+            continue
+        for window in windows:
+            # 滚动求和
+            cumulative[f'{col}_sum_{window}'] = features[col].rolling(window=window).sum()
+            # 滚动均值
+            cumulative[f'{col}_mean_{window}'] = features[col].rolling(window=window).mean()
+    
+    # 加速度的滚动标准差（波动程度）
+    if 'net_accel_1' in features.columns:
+        for window in windows:
+            cumulative[f'accel_std_{window}'] = features['net_accel_1'].rolling(window=window).std()
+    
+    return cumulative
+
+
+def compute_spread_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    计算价差特征
+    """
+    features = pd.DataFrame(index=df.index)
+    
+    # 价差
+    features['spread'] = df['ask1_px'] - df['bid1_px']
+    
+    # 价差变化
+    features['spread_velocity'] = features['spread'].diff()
+    
+    # 相对价差（相对于mid-price）
+    mid_price = (df['ask1_px'] + df['bid1_px']) / 2
+    features['spread_ratio'] = features['spread'] / (mid_price + 1e-10)
+    
+    return features
+
+
+def get_feature_importance_ranking() -> dict:
+    """
+    返回特征重要性排序（基于讨论确定）
+    
+    用于特征选择和模型解释
+    """
+    return {
+        '⭐⭐⭐ 最重要': [
+            'bid1_accel', 'ask1_accel', 'net_accel_1',
+            'imbalance_1_accel'
+        ],
+        '⭐⭐ 重要': [
+            'bid1_velocity', 'ask1_velocity', 'net_velocity_1',
+            'imbalance_1', 'imbalance_1_velocity'
+        ],
+        '⭐ 辅助': [
+            'bid2_accel', 'ask2_accel', 'net_accel_2',
+            'bid_ratio_12_velocity', 'ask_ratio_12_velocity',
+            'ratio_diff_velocity'
+        ],
+        '参考': [
+            'imbalance_2', 'spread', 'spread_velocity',
+            '累计指标'
+        ]
+    }
+
+
+# 保留旧接口兼容性
+def compute_orderbook_features(df: pd.DataFrame) -> pd.DataFrame:
+    """兼容旧接口"""
+    return create_features(df)
 
 
 def compute_technical_indicators(prices: pd.Series, 
                                   windows: List[int] = [5, 10, 20]) -> pd.DataFrame:
     """
-    计算技术指标
+    技术指标（对稳定币意义不大，仅保留接口）
     
-    Args:
-        prices: 价格序列
-        windows: 滚动窗口大小列表
-    
-    Returns:
-        技术指标 DataFrame
+    注意：稳定币价格几乎恒定，这些指标信号很弱
     """
     features = pd.DataFrame(index=prices.index)
     
+    # 只保留最基础的
     for window in windows:
-        # 移动平均
-        features[f'ma_{window}'] = prices.rolling(window=window).mean()
-        
-        # 价格与MA的距离
-        features[f'price_ma_{window}_dist'] = prices - features[f'ma_{window}']
-        
-        # 指数移动平均
-        features[f'ema_{window}'] = prices.ewm(span=window, adjust=False).mean()
-        
-        # 波动率 (滚动标准差)
-        features[f'volatility_{window}'] = prices.rolling(window=window).std()
-        
-        # 最高价/最低价
-        features[f'rolling_max_{window}'] = prices.rolling(window=window).max()
-        features[f'rolling_min_{window}'] = prices.rolling(window=window).min()
-        
-        # 价格位置 (相对于最高最低价)
-        features[f'price_position_{window}'] = (
-            (prices - features[f'rolling_min_{window}']) / 
-            (features[f'rolling_max_{window}'] - features[f'rolling_min_{window}'] + 1e-10)
-        )
-    
-    # RSI (相对强弱指标)
-    delta = prices.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    features['rsi'] = 100 - (100 / (1 + rs))
-    
-    # Bollinger Bands
-    bb_window = 20
-    bb_ma = prices.rolling(window=bb_window).mean()
-    bb_std = prices.rolling(window=bb_window).std()
-    
-    features['bb_upper'] = bb_ma + 2 * bb_std
-    features['bb_lower'] = bb_ma - 2 * bb_std
-    features['bb_width'] = (features['bb_upper'] - features['bb_lower']) / (bb_ma + 1e-10)
-    features['bb_position'] = (prices - features['bb_lower']) / (features['bb_upper'] - features['bb_lower'] + 1e-10)
+        features[f'price_std_{window}'] = prices.rolling(window=window).std()
     
     return features
-
-
-def compute_change_features(df: pd.DataFrame, 
-                            windows: List[int] = [1, 5, 10]) -> pd.DataFrame:
-    """
-    计算时序变化特征
-    
-    Args:
-        df: 订单簿数据
-        windows: 变化窗口列表
-    
-    Returns:
-        变化特征 DataFrame
-    """
-    features = pd.DataFrame(index=df.index)
-    
-    # 中间价格
-    mid_price = (df['bid1_px'] + df['ask1_px']) / 2
-    
-    # 价格收益率
-    for window in windows:
-        features[f'return_{window}'] = mid_price.pct_change(periods=window)
-        features[f'log_return_{window}'] = np.log(mid_price / mid_price.shift(window))
-    
-    # 总数量
-    bid_qty_cols = [f'bid{i}_qty' for i in range(1, 6)]
-    ask_qty_cols = [f'ask{i}_qty' for i in range(1, 6)]
-    total_qty = df[bid_qty_cols + ask_qty_cols].sum(axis=1)
-    
-    # 数量变化
-    for window in windows:
-        features[f'qty_change_{window}'] = total_qty.pct_change(periods=window)
-    
-    # 价差变化
-    spread = df['ask1_px'] - df['bid1_px']
-    for window in windows:
-        features[f'spread_change_{window}'] = spread.diff(periods=window)
-    
-    # 不平衡变化
-    imbalance = (df['bid1_qty'] - df['ask1_qty']) / (df['bid1_qty'] + df['ask1_qty'] + 1e-10)
-    for window in windows:
-        features[f'imbalance_change_{window}'] = imbalance.diff(periods=window)
-    
-    return features
-
-
-def select_features(features: pd.DataFrame, 
-                    method: str = 'variance',
-                    threshold: float = 0.01) -> List[str]:
-    """
-    特征选择
-    
-    Args:
-        features: 特征 DataFrame
-        method: 选择方法 ('variance' 或 'correlation')
-        threshold: 阈值
-    
-    Returns:
-        选中的特征名列表
-    """
-    selected = []
-    
-    if method == 'variance':
-        # 基于方差的选择
-        variances = features.var()
-        selected = variances[variances > threshold].index.tolist()
-    
-    elif method == 'correlation':
-        # 移除高度相关的特征
-        corr_matrix = features.corr().abs()
-        upper_tri = np.triu(np.ones(corr_matrix.shape), k=1)
-        upper_tri_df = pd.DataFrame(upper_tri, 
-                                    columns=corr_matrix.columns,
-                                    index=corr_matrix.index)
-        
-        # 找出高度相关的特征对
-        to_drop = []
-        for col in corr_matrix.columns:
-            if col not in to_drop:
-                # 找出与当前特征高度相关的其他特征
-                high_corr = corr_matrix.index[
-                    (corr_matrix[col] > threshold) & 
-                    (upper_tri_df[col] == 1)
-                ].tolist()
-                to_drop.extend(high_corr)
-        
-        selected = [col for col in features.columns if col not in to_drop]
-    
-    print(f"特征选择 ({method}): {len(features.columns)} -> {len(selected)} 个特征")
-    
-    return selected
 
 
 if __name__ == "__main__":
@@ -336,7 +290,6 @@ if __name__ == "__main__":
     import os
     import sys
     
-    # 添加项目根目录到路径
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     sys.path.insert(0, project_root)
     
@@ -354,8 +307,7 @@ if __name__ == "__main__":
     print(f"\n特征统计:")
     print(features.describe())
     
-    # 检查缺失值
-    missing = features.isnull().sum()
-    if missing.any():
-        print(f"\n缺失值:")
-        print(missing[missing > 0])
+    # 打印重要性排序
+    print("\n特征重要性排序:")
+    for level, cols in get_feature_importance_ranking().items():
+        print(f"  {level}: {cols}")

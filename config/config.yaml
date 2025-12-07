@@ -6,9 +6,9 @@ data:
   
 # 特征配置
 features:
-  lookback_window: 60        # 回看窗口 (分钟)
-  prediction_horizon: 5      # 预测周期 (分钟)
-  price_threshold: 0.0001    # 价格变化阈值
+  lookback_window: 30         # 回看窗口 (分钟) - 从60改为30
+  prediction_horizon: 5       # 预测周期 (分钟)
+  price_threshold: 0.0001     # 价格变化阈值
   
 # 数据划分
 split:
